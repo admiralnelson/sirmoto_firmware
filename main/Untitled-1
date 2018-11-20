@@ -1,0 +1,113 @@
+
+#include <DNSServer.h>
+#include <WebServer.h>
+#include "WiFi.h"
+#include "ESPAsyncWebServer.h"
+#include <WiFiClient.h>
+#include <ping.h>
+#define DBG_OUTPUT_PORT Serial
+// select which pin will trigger the configuration portal when set to LOW
+// ESP-01 users please note: the only pins available (0 and 2), are shared 
+// with the bootloader, so always set them HIGH at power-up
+#define TRIGGER_PIN 0
+
+WebServer server(80);
+
+String Head()
+{
+	String out;
+	out = " ";
+	out += "	<html>";
+	out +="		<head>";
+	out +="			<style>";
+	out +="				body{";
+	out +="				}";
+	out +="				body{";
+	out +="				}";
+	out +="			</style>";
+	out +="		</head>";
+	out +="		<body>";
+	out +="			<div>";
+	out +="				<span><a href=\"index\" >Home</a></span> | ";
+	out +="				<span><a href=\"settings\">Setting</a></span> | ";
+	out +="				<span><a href=\"account\">Account</a></span> | " ;
+	out +="			</div>	";
+	return out;
+}
+
+
+String Foot()
+{
+	String out;
+	out = " " ;
+	out +="		</body>";
+	out +="	</html>";
+	return out;
+}
+
+
+void CredentialSetup()
+{
+    String out = Head();
+    if(InternetConnectionTest())
+    {
+        out += "<form method='post'>";
+            out += "Email:<input type='text' name='email' />";
+            out += "Password:<input type='text' name='password' />";
+            out += "<button type='submit'>Login</button>";
+        out += "</form>";
+    }
+    else
+    {
+        out += "<h1>No Internet connection</h1>";
+    }
+    out += Foot();
+    server.send(200, "text/html", out);
+}
+
+
+
+bool InternetConnectionTest()
+{
+    IPAddress adr = IPAddress(8,8,8, 8);
+    int target = 4;
+    size_t i = 0;
+    for(i=0; i < 5; i++)
+        ping_start(adr, 4, 0, 0, 5) ? i++ : i;
+    return i == 4;
+    
+}
+
+void setup()
+{
+    // put your setup code here, to run once:
+    String ssid = "Wifi test";
+    String password = "123";
+    Serial.begin(115200);
+    Serial.println("\n Starting");
+    server.on("/all", HTTP_GET, [](){
+        String json = "{";
+        json += "\"heap\":"+String(ESP.getFreeHeap());
+        json += ", \"analog\":"+String(analogRead(A0));
+        json += "}";
+        server.send(200, "text/json", json);
+        json = String();
+    });
+    server.on("/login", HTTP_GET, CredentialSetup);
+    server.begin();
+    pinMode(TRIGGER_PIN, INPUT);
+    DBG_OUTPUT_PORT.printf("Connecting to %s\n", ssid);
+	if (String(WiFi.SSID()) != String(ssid)) 
+    {
+		WiFi.softAP(ssid, password);
+	}
+}
+
+
+void loop() 
+{
+
+	
+    server.handleClient();
+
+}

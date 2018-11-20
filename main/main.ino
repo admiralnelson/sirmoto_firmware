@@ -1,5 +1,6 @@
 #include <WiFi.h>
 #include <Time.h>
+#include "SimpleTimer.h"
 #include "QList.h"
 #include "ESPAsyncWebServer.h"
 #include "ping.h"
@@ -13,16 +14,24 @@
 #define SCHEDULE_FILE "/schedule.cfg"
 #define DEVICE_STATE_FILE "/device.cfg"
 
-#define URL_TEST_INTERNET "http://10.30.40.245/Device/TestInternet"
-#define URL_LOGIN "http://10.30.40.245/Token/Create"
-#define URL_REGISTER_DEVICE "http://10.30.40.245/Device/RegisterDevice"
-#define URL_STATUS_DEVICE "http://10.30.40.245/Device/"
-#define URL_SCHEDULE_DEVICE "http://10.30.40.245/Device/GetSchedulesByIdSimple/"
-#define URL_DETAILED_SCHEDULE_DEVICE "http://10.30.40.245/Device/GetDetailedScheduleById/"
+#define URL_TEST_INTERNET "http://103.236.201.99/Device/TestInternet"
+#define URL_LOGIN "http://103.236.201.99/Token/Create"
+#define URL_REGISTER_DEVICE "http://103.236.201.99/Device/RegisterDevice"
+#define URL_STATUS_DEVICE "http://103.236.201.99/Device/GetDeviceById/"
+#define URL_STATUS_UPDATE_DEFAULT_DEVICE "http://103.236.201.99/Device/SendDefaultCommand/"
+#define URL_SCHEDULE_DEVICE "http://103.236.201.99/Device/GetSchedulesByIdSimple/"
+#define URL_DETAILED_SCHEDULE_DEVICE "http://103.236.201.99/Device/GetDetailedScheduleById/" 
+
+#define STATE_READY "READY"
+#define STATE_STATE_WATERING_ONDEMAND "STATE_WATERING_ONDEMAND"
 
 #define TIME_SERVER_NTP "pool.ntp.org"
 #define TIME_DEFAULT_GMTOFFSET  28800
 #define TIME_DEFAULT_DAYLIGHTOFFSET  3600
+
+#define PORT_WATERING_SOLENOID 27
+#define PORT_LED_READY 28
+#define PORT_LED_ERROR 29
 
 #define HARDWARE_VERSION "Sirmoto-EZ"
 
@@ -43,6 +52,7 @@ struct DeviceInfo
 	String currentMode;
 	String currentdeviceName;
 	String currentWeatherLocation;
+	String currentInfo;
 };
 
 struct DeviceState
@@ -58,6 +68,7 @@ struct DeviceSchedule
 };
 
 AsyncWebServer server(80);
+SimpleTimer timer;
 DeviceInfo g_deviceInfo;
 QList<DeviceSchedule> g_deviceSchedules;
 
@@ -146,6 +157,30 @@ String Foot()
 	return out;
 }
 
+void PeriodicProcedure()
+{
+	Serial.println("running!");
+}
+
+void WateringProcedureTurnOffValve()
+{
+	Serial.println("WateringProcedureTurnOffValve() closing valve");
+	digitalWrite(PORT_WATERING_SOLENOID, false);
+	Serial.println("WateringProcedureTurnOffValve() updating device state");
+	if(AttemptUpdateDeviceState())
+	{
+		Serial.println("WateringProcedureTurnOffValve() update success");
+	}
+	else Serial.println("WateringProcedureTurnOffValve() update failure, state might still on STATE_WATERING_ONDEMAND");
+}
+
+void WateringProcedure()
+{
+	digitalWrite(PORT_WATERING_SOLENOID, true);
+	Serial.println("WateringProcedure() watering now");
+	timer.setTimer(1000*60*1, WateringProcedureTurnOffValve, 1);
+	Serial.println("WateringProcedure() enabled turn off valve in 5 mins");
+}
 
 bool InternetConnectionTest()
 {
@@ -208,11 +243,10 @@ bool AttemptLogin(String user, String password)
             String payload = http.getString();
 			result = true;
 			Serial.println(payload);
-			DeviceInfo device;
-			device.token= payload;
-			device.currentdeviceName = "New Sirmoto Device";
-			device.currentMode = "SCHEDULED";
-			AttemptRegisterDevice(device);
+			g_deviceInfo.token= payload;
+			g_deviceInfo.currentdeviceName = "New Sirmoto Device";
+			g_deviceInfo.currentMode = "SCHEDULED";
+			AttemptRegisterDevice();
 		}
 	}
 	else
@@ -222,7 +256,7 @@ bool AttemptLogin(String user, String password)
 	return result;
 }
 
-bool AttemptRegisterDevice(DeviceInfo device)
+bool AttemptRegisterDevice()
 {
 	HTTPClient http;
 	bool result = false;
@@ -231,9 +265,8 @@ bool AttemptRegisterDevice(DeviceInfo device)
     JsonObject &obj = jb.createObject();
 	DynamicJsonBuffer jb2;
     JsonObject &obj2 = jb2.createObject();
-	obj["DeviceName"] = device.currentdeviceName;
-	obj["DeviceInfo"] = HARDWARE_VERSION;
-	obj2["Mode"] = device.currentMode;
+	obj["DeviceName"] = g_deviceInfo.currentdeviceName;
+	obj2["Mode"] = g_deviceInfo.currentMode;
 	obj2.printTo(out2);
 	obj["DeviceState"] = out2;
 	obj.printTo(out);
@@ -243,7 +276,7 @@ bool AttemptRegisterDevice(DeviceInfo device)
 	Serial.print("[HTTP] AttemptRegisterDevice()  begin...\n");
     http.begin(URL_REGISTER_DEVICE); //HTTP
 	http.addHeader("Content-Type", "application/json");
-	http.addHeader("Authorization", "Bearer " + device.token);
+	http.addHeader("Authorization", "Bearer " + g_deviceInfo.token);
     Serial.print("[HTTP] AttemptRegisterDevice()  POST...\n");
     int httpCode = http.POST(out);
 	
@@ -265,10 +298,10 @@ bool AttemptRegisterDevice(DeviceInfo device)
 			}
 			else
 			{	
-				device.currentDeviceId = obj2["Sirmoto"]["Id"].as<int>();
+				g_deviceInfo.currentDeviceId = obj2["Sirmoto"]["Id"].as<int>();
 				
 				result = true;
-				SaveDeviceState(device);
+				SaveDeviceState(g_deviceInfo);
 			}
 			Serial.println(payload);
 		}
@@ -284,10 +317,11 @@ bool AttemptGetDeviceState()
 {
  bool result = false;
 	HTTPClient http;
-	http.begin(URL_REGISTER_DEVICE); //HTTP
+	http.begin(URL_STATUS_DEVICE + String(g_deviceInfo.currentDeviceId)); //HTTP
 	http.addHeader("Content-Type", "application/json");
 	http.addHeader("Authorization", "Bearer " + g_deviceInfo.token);
-    Serial.print("[HTTP] AttemptGetDeviceState() GET...\n");
+    Serial.print("[HTTP] AttemptGetDeviceState() GET... with bearer: ");
+    Serial.println(g_deviceInfo.token);
     int httpCode = http.GET();
 	
     // httpCode will be negative on error
@@ -308,7 +342,8 @@ bool AttemptGetDeviceState()
 			}
 			else
 			{
-				g_deviceInfo.currentDeviceId = obj2["Sirmoto"]["Id"].as<int>();
+				g_deviceInfo.currentInfo = obj2["DeviceInfo"].as<char*>();
+				g_deviceInfo.currentdeviceName = obj2["DeviceName"].as<char*>();
 				SaveDeviceState(g_deviceInfo);
 				result = true;
 			}
@@ -319,6 +354,44 @@ bool AttemptGetDeviceState()
 	else
 	{
 		Serial.printf("[HTTP] AttemptGetDeviceState() GET... code: %d\n", httpCode);
+	}
+	if(g_deviceInfo.currentInfo == STATE_STATE_WATERING_ONDEMAND)
+	{
+		WateringProcedure();
+	}
+ Serial.print("[HTTP] AttemptGetDeviceState() ");
+ Serial.println(g_deviceInfo.currentInfo);
+	return result;
+}
+
+bool AttemptUpdateDeviceState()
+{
+	 bool result = false;
+	HTTPClient http;
+	http.begin(URL_STATUS_UPDATE_DEFAULT_DEVICE+ String(g_deviceInfo.currentDeviceId)); //HTTP
+	http.addHeader("Content-Type", "application/json");
+	http.addHeader("Authorization", "Bearer " + g_deviceInfo.token);
+    Serial.print("[HTTP] AttemptUpdateDeviceState() GET...");
+	Serial.println(g_deviceInfo.currentDeviceId);
+    int httpCode = http.GET();
+	
+    // httpCode will be negative on error
+    if(httpCode > 0) 
+	{
+        // HTTP header has been send and Server response header has been handled
+        Serial.printf("[HTTP] AttemptUpdateDeviceState() GET... code: %d\n", httpCode);
+
+        // file found at server
+        if(httpCode == HTTP_CODE_OK) 
+		{
+            String payload = http.getString();
+			Serial.println(payload);
+      result = true;
+		}
+	}
+	else
+	{
+		Serial.printf("[HTTP] AttemptUpdateDeviceState() GET... code: %d\n", httpCode);
 	}
 	return result;
 }
@@ -618,11 +691,11 @@ void setup()
 	else
   	{
 		Serial.println("This should not be executed!");
-		WiFi.softAP(g_ssid, g_password);    
+		  WiFi.softAP(g_ssid, "");    
     	Serial.println(WiFi.softAPIP());
+      Serial.println("WIFI SHOULD BE ON NOW");
   	}
 	Serial.println(WiFi.softAPIP());
-
 	server.on("/hello", HTTP_GET, [](AsyncWebServerRequest *request){
 		request->send(200, "text/plain", "Hello World");
 	});
@@ -653,6 +726,9 @@ void setup()
 	});
 	server.begin();
 	configTime(TIME_DEFAULT_GMTOFFSET, TIME_DEFAULT_DAYLIGHTOFFSET, TIME_SERVER_NTP);
+	LoadDeviceState();
+	timer.setInterval(1000*60,AttemptGetDeviceState);
+	Serial.println("READY");
 }
 
 
@@ -910,4 +986,7 @@ void CredentialSetup(AsyncWebServerRequest *request)
 
 
 
-void loop(){}
+void loop()
+{
+	timer.run();
+}
