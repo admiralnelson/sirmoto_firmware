@@ -24,6 +24,7 @@
 
 #define STATE_READY "READY"
 #define STATE_STATE_WATERING_ONDEMAND "STATE_WATERING_ONDEMAND"
+#define STATE_REBOOT "STATE_WATERING_ONDEMAND"
 
 #define TIME_SERVER_NTP "pool.ntp.org"
 #define TIME_DEFAULT_GMTOFFSET  28800
@@ -157,6 +158,17 @@ String Foot()
 	return out;
 }
 
+String RandomString()
+{
+	String out = "";
+	for(auto i=0;i<10;i++)
+	{
+		char c = random(65, 90);
+		out += c;
+	}
+	return out;
+}
+
 void PeriodicProcedure()
 {
 	Serial.println("running!");
@@ -244,7 +256,7 @@ bool AttemptLogin(String user, String password)
 			result = true;
 			Serial.println(payload);
 			g_deviceInfo.token= payload;
-			g_deviceInfo.currentdeviceName = "New Sirmoto Device";
+			g_deviceInfo.currentdeviceName = "Sirmoto Device "+RandomString();
 			g_deviceInfo.currentMode = "SCHEDULED";
 			AttemptRegisterDevice();
 		}
